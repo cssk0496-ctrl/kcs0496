@@ -4,11 +4,10 @@ import time
 from datetime import date
 from io import BytesIO
 
-import gspread
 import pandas as pd
 import plotly.express as px
+import requests
 import streamlit as st
-from google.oauth2.service_account import Credentials
 
 
 st.set_page_config(
@@ -17,47 +16,36 @@ st.set_page_config(
     layout="wide",
 )
 
-SPREADSHEET_ID = "196923nSx3EMfDr5x13AY-h2EczjbRP0_7wBhNU-b_ZM"
-WORKSHEET_NAME = "예산내역"
+API_URL = (
+    "https://script.google.com/macros/s/"
+    "AKfycbw7NN0cP98boE3IjD7-a7yC9l2sMS81y0oMuX87eAZxusCDQtlh2DlIXpaWR4X55bs5GQ/"
+    "exec"
+)
 CATEGORIES = ["수선유지비", "비품", "개량공사"]
 MEMBERS = ["부장님", "팀원1", "팀원2", "팀원3", "팀원4"]
 COLUMNS = ["ID", "연월", "팀원", "항목", "금액"]
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-
-
-@st.cache_resource
-def get_worksheet():
-    credentials = Credentials.from_service_account_info(
-        dict(st.secrets["gcp_service_account"]),
-        scopes=SCOPES,
-    )
-    client = gspread.authorize(credentials)
-    spreadsheet = client.open_by_key(SPREADSHEET_ID)
-    try:
-        worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
-    except gspread.WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(
-            title=WORKSHEET_NAME,
-            rows=1000,
-            cols=len(COLUMNS),
-        )
-    if not worksheet.row_values(1):
-        worksheet.append_row(COLUMNS)
-    return worksheet
 
 
 def empty_data() -> pd.DataFrame:
     return pd.DataFrame(columns=COLUMNS)
 
 
-def load_data(worksheet) -> pd.DataFrame:
-    records = worksheet.get_all_records(
-        expected_headers=COLUMNS,
-        numericise_ignore=["all"],
-    )
+def call_api(payload: dict) -> dict:
+    response = requests.post(API_URL, json=payload, timeout=30)
+    response.raise_for_status()
+    result = response.json()
+    if not result.get("success"):
+        raise RuntimeError(result.get("error", "Apps Script 요청에 실패했습니다."))
+    return result
+
+
+def load_data() -> pd.DataFrame:
+    response = requests.get(API_URL, timeout=30)
+    response.raise_for_status()
+    result = response.json()
+    if not result.get("success"):
+        raise RuntimeError(result.get("error", "데이터를 불러오지 못했습니다."))
+    records = result.get("data", [])
     if not records:
         return empty_data()
     result = pd.DataFrame(records, columns=COLUMNS)
@@ -84,22 +72,23 @@ def normalize_data(data: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def replace_all_data(worksheet, data: pd.DataFrame) -> None:
-    worksheet.clear()
-    values = [COLUMNS]
-    values.extend(data[COLUMNS].astype(object).values.tolist())
-    worksheet.update(values=values, range_name="A1")
+def replace_all_data(data: pd.DataFrame) -> None:
+    call_api({"action": "clear"})
+    for row in data.to_dict("records"):
+        call_api(
+            {
+                "action": "append",
+                "ID": str(row["ID"]),
+                "연월": str(row["연월"]),
+                "팀원": str(row["팀원"]),
+                "항목": str(row["항목"]),
+                "금액": int(row["금액"]),
+            }
+        )
 
 
-def delete_entries(worksheet, ids: set[str]) -> None:
-    values = worksheet.get_all_values()
-    rows_to_delete = [
-        row_number
-        for row_number, row in enumerate(values[1:], start=2)
-        if row and str(row[0]) in ids
-    ]
-    for row_number in sorted(rows_to_delete, reverse=True):
-        worksheet.delete_rows(row_number)
+def delete_entries(ids: set[str]) -> None:
+    call_api({"action": "delete", "ids": list(ids)})
 
 
 def to_excel(data: pd.DataFrame) -> bytes:
@@ -129,13 +118,12 @@ st.title("📊 팀 예산 관리 시스템")
 st.caption("부장님 보고용 월별 예산 취합 및 대시보드 · Google Sheets 연동")
 
 try:
-    sheet = get_worksheet()
-    data = load_data(sheet)
+    data = load_data()
 except Exception as exc:
     st.error("Google Sheets에 연결하지 못했습니다.")
     st.info(
-        "Streamlit의 Settings → Secrets에 서비스 계정 정보를 입력하고, "
-        "스프레드시트를 서비스 계정 이메일에 편집자로 공유했는지 확인하세요."
+        "Apps Script가 웹 앱으로 배포되어 있고 액세스 권한이 "
+        "'모든 사용자'인지 확인하세요."
     )
     st.code(str(exc))
     st.stop()
@@ -167,15 +155,15 @@ with input_tab:
             )
 
         if submitted:
-            sheet.append_row(
-                [
-                    str(time.time_ns()),
-                    selected_month.strftime("%Y-%m"),
-                    member,
-                    category,
-                    int(amount),
-                ],
-                value_input_option="USER_ENTERED",
+            call_api(
+                {
+                    "action": "append",
+                    "ID": str(time.time_ns()),
+                    "연월": selected_month.strftime("%Y-%m"),
+                    "팀원": member,
+                    "항목": category,
+                    "금액": int(amount),
+                }
             )
             st.success("Google Sheets에 정상적으로 저장되었습니다.")
             st.rerun()
@@ -192,7 +180,7 @@ with input_tab:
         ):
             try:
                 uploaded_data = normalize_data(pd.read_csv(uploaded_file))
-                replace_all_data(sheet, uploaded_data)
+                replace_all_data(uploaded_data)
                 st.success("Google Sheets 데이터를 교체했습니다.")
                 st.rerun()
             except Exception as exc:
@@ -230,8 +218,7 @@ with input_tab:
                     use_container_width=True,
                 ):
                     delete_entries(
-                        sheet,
-                        {delete_options[label] for label in selected_entries},
+                        {delete_options[label] for label in selected_entries}
                     )
                     st.rerun()
             with clear_col:
@@ -241,7 +228,7 @@ with input_tab:
                     disabled=not clear_confirmed,
                     use_container_width=True,
                 ):
-                    replace_all_data(sheet, empty_data())
+                    replace_all_data(empty_data())
                     st.rerun()
 
             csv_data = data.to_csv(index=False).encode("utf-8-sig")
