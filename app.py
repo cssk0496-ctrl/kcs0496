@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import time
 from datetime import date
 from io import BytesIO
 
+import gspread
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from google.oauth2.service_account import Credentials
 
 
 st.set_page_config(
@@ -14,13 +17,53 @@ st.set_page_config(
     layout="wide",
 )
 
+SPREADSHEET_ID = "196923nSx3EMfDr5x13AY-h2EczjbRP0_7wBhNU-b_ZM"
+WORKSHEET_NAME = "예산내역"
 CATEGORIES = ["수선유지비", "비품", "개량공사"]
 MEMBERS = ["부장님", "팀원1", "팀원2", "팀원3", "팀원4"]
 COLUMNS = ["ID", "연월", "팀원", "항목", "금액"]
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+
+@st.cache_resource
+def get_worksheet():
+    credentials = Credentials.from_service_account_info(
+        dict(st.secrets["gcp_service_account"]),
+        scopes=SCOPES,
+    )
+    client = gspread.authorize(credentials)
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
+    try:
+        worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
+    except gspread.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(
+            title=WORKSHEET_NAME,
+            rows=1000,
+            cols=len(COLUMNS),
+        )
+    if not worksheet.row_values(1):
+        worksheet.append_row(COLUMNS)
+    return worksheet
 
 
 def empty_data() -> pd.DataFrame:
     return pd.DataFrame(columns=COLUMNS)
+
+
+def load_data(worksheet) -> pd.DataFrame:
+    records = worksheet.get_all_records(
+        expected_headers=COLUMNS,
+        numericise_ignore=["all"],
+    )
+    if not records:
+        return empty_data()
+    result = pd.DataFrame(records, columns=COLUMNS)
+    result["ID"] = result["ID"].astype(str)
+    result["금액"] = pd.to_numeric(result["금액"], errors="coerce").fillna(0).astype(int)
+    return result
 
 
 def normalize_data(data: pd.DataFrame) -> pd.DataFrame:
@@ -29,12 +72,11 @@ def normalize_data(data: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"필수 열이 없습니다: {', '.join(sorted(missing))}")
 
     result = data[COLUMNS].copy()
-    result["ID"] = pd.to_numeric(result["ID"], errors="raise").astype("int64")
+    result["ID"] = result["ID"].astype(str)
     result["금액"] = pd.to_numeric(result["금액"], errors="raise").astype("int64")
     result["연월"] = result["연월"].astype(str)
     result["팀원"] = result["팀원"].astype(str)
     result["항목"] = result["항목"].astype(str)
-
     if (~result["연월"].str.match(r"^\d{4}-\d{2}$")).any():
         raise ValueError("연월은 YYYY-MM 형식이어야 합니다.")
     if (result["금액"] < 0).any():
@@ -42,17 +84,29 @@ def normalize_data(data: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def replace_all_data(worksheet, data: pd.DataFrame) -> None:
+    worksheet.clear()
+    values = [COLUMNS]
+    values.extend(data[COLUMNS].astype(object).values.tolist())
+    worksheet.update(values=values, range_name="A1")
+
+
+def delete_entries(worksheet, ids: set[str]) -> None:
+    values = worksheet.get_all_values()
+    rows_to_delete = [
+        row_number
+        for row_number, row in enumerate(values[1:], start=2)
+        if row and str(row[0]) in ids
+    ]
+    for row_number in sorted(rows_to_delete, reverse=True):
+        worksheet.delete_rows(row_number)
+
+
 def to_excel(data: pd.DataFrame) -> bytes:
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         data.to_excel(writer, index=False, sheet_name="예산내역")
     return output.getvalue()
-
-
-if "budget_data" not in st.session_state:
-    st.session_state.budget_data = empty_data()
-if "next_id" not in st.session_state:
-    st.session_state.next_id = 1
 
 
 st.markdown(
@@ -72,7 +126,19 @@ st.markdown(
 )
 
 st.title("📊 팀 예산 관리 시스템")
-st.caption("부장님 보고용 월별 예산 취합 및 대시보드")
+st.caption("부장님 보고용 월별 예산 취합 및 대시보드 · Google Sheets 연동")
+
+try:
+    sheet = get_worksheet()
+    data = load_data(sheet)
+except Exception as exc:
+    st.error("Google Sheets에 연결하지 못했습니다.")
+    st.info(
+        "Streamlit의 Settings → Secrets에 서비스 계정 정보를 입력하고, "
+        "스프레드시트를 서비스 계정 이메일에 편집자로 공유했는지 확인하세요."
+    )
+    st.code(str(exc))
+    st.stop()
 
 input_tab, dashboard_tab = st.tabs(["📝 데이터 입력", "📈 전체 대시보드"])
 
@@ -101,23 +167,18 @@ with input_tab:
             )
 
         if submitted:
-            new_row = pd.DataFrame(
+            sheet.append_row(
                 [
-                    {
-                        "ID": st.session_state.next_id,
-                        "연월": selected_month.strftime("%Y-%m"),
-                        "팀원": member,
-                        "항목": category,
-                        "금액": int(amount),
-                    }
-                ]
+                    str(time.time_ns()),
+                    selected_month.strftime("%Y-%m"),
+                    member,
+                    category,
+                    int(amount),
+                ],
+                value_input_option="USER_ENTERED",
             )
-            st.session_state.budget_data = pd.concat(
-                [new_row, st.session_state.budget_data],
-                ignore_index=True,
-            )
-            st.session_state.next_id += 1
-            st.success("예산 데이터가 정상적으로 기록되었습니다.")
+            st.success("Google Sheets에 정상적으로 저장되었습니다.")
+            st.rerun()
 
         st.divider()
         st.subheader("파일로 불러오기")
@@ -126,27 +187,19 @@ with input_tab:
             type=["csv"],
         )
         if uploaded_file is not None and st.button(
-            "CSV 데이터 적용",
+            "CSV 데이터로 전체 교체",
             use_container_width=True,
         ):
             try:
-                uploaded_data = pd.read_csv(uploaded_file)
-                uploaded_data = normalize_data(uploaded_data)
-                st.session_state.budget_data = uploaded_data
-                st.session_state.next_id = (
-                    int(uploaded_data["ID"].max()) + 1
-                    if not uploaded_data.empty
-                    else 1
-                )
-                st.success("CSV 데이터를 불러왔습니다.")
+                uploaded_data = normalize_data(pd.read_csv(uploaded_file))
+                replace_all_data(sheet, uploaded_data)
+                st.success("Google Sheets 데이터를 교체했습니다.")
                 st.rerun()
             except Exception as exc:
                 st.error(f"파일을 불러오지 못했습니다: {exc}")
 
     with history_col:
         st.subheader("📂 최근 입력 내역")
-        data = st.session_state.budget_data
-
         if data.empty:
             st.info("등록된 데이터가 없습니다.")
         else:
@@ -162,7 +215,7 @@ with input_tab:
 
             delete_options = {
                 f"{row['연월']} | {row['팀원']} | {row['항목']} | "
-                f"{int(row['금액']):,}원 (ID {int(row['ID'])})": int(row["ID"])
+                f"{int(row['금액']):,}원": str(row["ID"])
                 for _, row in data.iterrows()
             }
             selected_entries = st.multiselect(
@@ -176,21 +229,19 @@ with input_tab:
                     disabled=not selected_entries,
                     use_container_width=True,
                 ):
-                    selected_ids = {
-                        delete_options[label] for label in selected_entries
-                    }
-                    st.session_state.budget_data = data[
-                        ~data["ID"].isin(selected_ids)
-                    ].reset_index(drop=True)
+                    delete_entries(
+                        sheet,
+                        {delete_options[label] for label in selected_entries},
+                    )
                     st.rerun()
             with clear_col:
+                clear_confirmed = st.checkbox("전체 초기화 확인")
                 if st.button(
                     "모든 데이터 초기화",
-                    type="secondary",
+                    disabled=not clear_confirmed,
                     use_container_width=True,
                 ):
-                    st.session_state.budget_data = empty_data()
-                    st.session_state.next_id = 1
+                    replace_all_data(sheet, empty_data())
                     st.rerun()
 
             csv_data = data.to_csv(index=False).encode("utf-8-sig")
@@ -216,7 +267,6 @@ with input_tab:
                 )
 
 with dashboard_tab:
-    data = st.session_state.budget_data
     total = int(data["금액"].sum()) if not data.empty else 0
     category_totals = (
         data.groupby("항목", as_index=False)["금액"].sum()
@@ -234,8 +284,7 @@ with dashboard_tab:
     metric2.metric(
         "최대 사용 항목",
         (
-            f"{top_category['항목']} "
-            f"({int(top_category['금액']):,}원)"
+            f"{top_category['항목']} ({int(top_category['금액']):,}원)"
             if top_category is not None
             else "-"
         ),
@@ -268,10 +317,7 @@ with dashboard_tab:
 
         with chart_col2:
             st.subheader("팀원별 누적 사용액")
-            member_totals = data.groupby(
-                "팀원",
-                as_index=False,
-            )["금액"].sum()
+            member_totals = data.groupby("팀원", as_index=False)["금액"].sum()
             fig_member = px.bar(
                 member_totals,
                 x="팀원",
@@ -301,21 +347,10 @@ with dashboard_tab:
             .sort_index(ascending=False)
         )
         summary["합계"] = summary.sum(axis=1)
-        summary = summary.reset_index()
         st.dataframe(
-            summary,
+            summary.reset_index(),
             hide_index=True,
             use_container_width=True,
-            column_config={
-                category: st.column_config.NumberColumn(
-                    category,
-                    format="localized",
-                )
-                for category in [*CATEGORIES, "합계"]
-            },
         )
 
-st.caption(
-    "※ Streamlit Community Cloud가 재시작되면 입력 데이터가 초기화될 수 "
-    "있으므로 CSV 또는 Excel 파일을 내려받아 보관하세요."
-)
+st.caption("입력한 데이터는 연결된 Google 스프레드시트에 실시간 저장됩니다.")
