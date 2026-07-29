@@ -21,9 +21,9 @@ API_URL = (
     "AKfycbw7NN0cP98boE3IjD7-a7yC9l2sMS81y0oMuX87eAZxusCDQtlh2DlIXpaWR4X55bs5GQ/"
     "exec"
 )
-CATEGORIES = ["수선유지비", "비품", "개량공사"]
+CATEGORIES = ["복리후생비", "수선비", "출장비", "접대비"]
 TEAMS = ["기획팀", "개발팀", "제조팀", "경영팀"]
-MEMBERS = ["부장님", "팀원1", "팀원2", "팀원3", "팀원4"]
+MEMBERS = ["팀장", "팀원"]
 COLUMNS = ["ID", "연월", "팀명", "팀원", "항목", "금액"]
 
 
@@ -312,9 +312,10 @@ with dashboard_tab:
                 hole=0.65,
                 color="항목",
                 color_discrete_map={
-                    "수선유지비": "#3b82f6",
-                    "비품": "#10b981",
-                    "개량공사": "#8b5cf6",
+                    "복리후생비": "#3b82f6",
+                    "수선비": "#10b981",
+                    "출장비": "#8b5cf6",
+                    "접대비": "#f59e0b",
                 },
             )
             fig_category.update_layout(
