@@ -22,29 +22,47 @@ API_URL = (
     "exec"
 )
 CATEGORIES = ["수선유지비", "비품", "개량공사"]
+TEAMS = ["기획팀", "개발팀", "제조팀", "경영팀"]
 MEMBERS = ["부장님", "팀원1", "팀원2", "팀원3", "팀원4"]
-COLUMNS = ["ID", "연월", "팀원", "항목", "금액"]
+COLUMNS = ["ID", "연월", "팀명", "팀원", "항목", "금액"]
 
 
 def empty_data() -> pd.DataFrame:
     return pd.DataFrame(columns=COLUMNS)
 
 
-def call_api(payload: dict) -> dict:
-    response = requests.post(API_URL, json=payload, timeout=30)
+def parse_api_response(response: requests.Response) -> dict:
     response.raise_for_status()
-    result = response.json()
+    try:
+        result = response.json()
+    except requests.JSONDecodeError as exc:
+        raise RuntimeError(
+            "Apps Script가 JSON을 반환하지 않았습니다. 웹 앱 배포 URL과 "
+            "액세스 권한(모든 사용자)을 확인하세요."
+        ) from exc
     if not result.get("success"):
         raise RuntimeError(result.get("error", "Apps Script 요청에 실패했습니다."))
     return result
 
 
+def call_api(payload: dict) -> dict:
+    response = requests.post(
+        API_URL,
+        json=payload,
+        timeout=30,
+        allow_redirects=True,
+    )
+    return parse_api_response(response)
+
+
 def load_data() -> pd.DataFrame:
-    response = requests.get(API_URL, timeout=30)
-    response.raise_for_status()
-    result = response.json()
-    if not result.get("success"):
-        raise RuntimeError(result.get("error", "데이터를 불러오지 못했습니다."))
+    response = requests.get(
+        API_URL,
+        params={"action": "list"},
+        timeout=30,
+        allow_redirects=True,
+    )
+    result = parse_api_response(response)
     records = result.get("data", [])
     if not records:
         return empty_data()
@@ -63,6 +81,7 @@ def normalize_data(data: pd.DataFrame) -> pd.DataFrame:
     result["ID"] = result["ID"].astype(str)
     result["금액"] = pd.to_numeric(result["금액"], errors="raise").astype("int64")
     result["연월"] = result["연월"].astype(str)
+    result["팀명"] = result["팀명"].astype(str)
     result["팀원"] = result["팀원"].astype(str)
     result["항목"] = result["항목"].astype(str)
     if (~result["연월"].str.match(r"^\d{4}-\d{2}$")).any():
@@ -73,18 +92,18 @@ def normalize_data(data: pd.DataFrame) -> pd.DataFrame:
 
 
 def replace_all_data(data: pd.DataFrame) -> None:
-    call_api({"action": "clear"})
-    for row in data.to_dict("records"):
-        call_api(
-            {
-                "action": "append",
-                "ID": str(row["ID"]),
-                "연월": str(row["연월"]),
-                "팀원": str(row["팀원"]),
-                "항목": str(row["항목"]),
-                "금액": int(row["금액"]),
-            }
-        )
+    records = [
+        {
+            "ID": str(row["ID"]),
+            "연월": str(row["연월"]),
+            "팀명": str(row["팀명"]),
+            "팀원": str(row["팀원"]),
+            "항목": str(row["항목"]),
+            "금액": int(row["금액"]),
+        }
+        for row in data.to_dict("records")
+    ]
+    call_api({"action": "replaceAll", "data": records})
 
 
 def delete_entries(ids: set[str]) -> None:
@@ -115,7 +134,7 @@ st.markdown(
 )
 
 st.title("📊 팀 예산 관리 시스템")
-st.caption("부장님 보고용 월별 예산 취합 및 대시보드 · Google Sheets 연동")
+st.caption("부장님 보고용 월별 예산 취합 및 대시보드 · Google Sheets 실시간 연동")
 
 try:
     data = load_data()
@@ -136,6 +155,7 @@ with input_tab:
     with form_col:
         st.subheader("내역 입력")
         with st.form("budget_form", clear_on_submit=True):
+            team = st.selectbox("팀명", TEAMS)
             member = st.selectbox("팀원 선택", MEMBERS)
             selected_month = st.date_input(
                 "해당 월",
@@ -160,6 +180,7 @@ with input_tab:
                     "action": "append",
                     "ID": str(time.time_ns()),
                     "연월": selected_month.strftime("%Y-%m"),
+                    "팀명": team,
                     "팀원": member,
                     "항목": category,
                     "금액": int(amount),
@@ -202,7 +223,7 @@ with input_tab:
             )
 
             delete_options = {
-                f"{row['연월']} | {row['팀원']} | {row['항목']} | "
+                f"{row['연월']} | {row['팀명']} | {row['팀원']} | {row['항목']} | "
                 f"{int(row['금액']):,}원": str(row["ID"])
                 for _, row in data.iterrows()
             }
@@ -269,7 +290,7 @@ with dashboard_tab:
     metric1, metric2, metric3 = st.columns(3)
     metric1.metric("전체 누적 사용액", f"{total:,}원")
     metric2.metric(
-        "최대 사용 항목",
+        "이번 달 최대 사용 항목",
         (
             f"{top_category['항목']} ({int(top_category['금액']):,}원)"
             if top_category is not None
