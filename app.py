@@ -89,6 +89,26 @@ def call_api(payload: dict) -> dict:
     return parse_api_response(response)
 
 
+def get_summary_token() -> str:
+    try:
+        return str(st.secrets.get("SUMMARY_TOKEN", "")).strip()
+    except Exception:
+        return ""
+
+
+def generate_ai_summary() -> str:
+    result = call_api(
+        {
+            "action": "summarize",
+            "token": get_summary_token(),
+        }
+    )
+    summary = str(result.get("summary", "")).strip()
+    if not summary:
+        raise RuntimeError("AI 요약 결과가 비어 있습니다.")
+    return summary
+
+
 def load_data() -> pd.DataFrame:
     response = requests.get(
         API_URL,
@@ -343,6 +363,29 @@ with dashboard_tab:
         ),
     )
     metric3.metric("데이터 건수", f"{len(data):,}건")
+
+    st.subheader("🤖 AI 자동 요약")
+    summary_token = get_summary_token()
+    if not summary_token:
+        st.info(
+            "AI 요약을 사용하려면 Streamlit Secrets에 "
+            "SUMMARY_TOKEN을 설정하세요."
+        )
+    else:
+        if st.button(
+            "AI 요약 생성",
+            type="primary",
+            disabled=data.empty,
+            use_container_width=True,
+        ):
+            try:
+                with st.spinner("예산 사용내역을 분석하고 있습니다..."):
+                    st.session_state["ai_budget_summary"] = generate_ai_summary()
+            except Exception as exc:
+                st.error(f"AI 요약을 생성하지 못했습니다: {exc}")
+
+        if st.session_state.get("ai_budget_summary"):
+            st.markdown(st.session_state["ai_budget_summary"])
 
     if data.empty:
         st.info("데이터를 입력하면 차트와 월별 취합표가 표시됩니다.")
