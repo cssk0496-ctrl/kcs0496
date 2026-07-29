@@ -1,5 +1,5 @@
 const SHEET_NAME = "예산내역";
-const HEADERS = ["ID", "연월", "팀명", "팀원", "항목", "금액"];
+const HEADERS = ["ID", "연월일", "팀명", "팀원", "항목", "금액"];
 
 function doGet(e) {
   try {
@@ -69,6 +69,11 @@ function getSheet() {
       if (sheet.getLastRow() > 1) {
         sheet.getRange(2, 3, sheet.getLastRow() - 1, 1).setValue("미지정");
       }
+    } else if (
+      currentHeaders.join("|") ===
+      ["ID", "연월", "팀명", "팀원", "항목", "금액"].join("|")
+    ) {
+      sheet.getRange(1, 2).setValue("연월일");
     }
   }
   return sheet;
@@ -87,7 +92,7 @@ function readAllRows() {
     .filter(row => row.some(value => value !== ""))
     .map(row => ({
       ID: String(row[0]),
-      "연월": String(row[1]),
+      "연월일": normalizeDate(row[1]),
       "팀명": String(row[2]),
       "팀원": String(row[3]),
       "항목": String(row[4]),
@@ -95,11 +100,29 @@ function readAllRows() {
     }));
 }
 
+function normalizeDate(value) {
+  if (value instanceof Date && !isNaN(value.getTime())) {
+    return Utilities.formatDate(value, Session.getScriptTimeZone(), "yyyy-MM-dd");
+  }
+
+  const text = String(value).trim();
+  const match = text.match(/^(\d{4})-(\d{2})(?:-(\d{2}))?/);
+  if (match) {
+    return match[1] + "-" + match[2] + "-" + (match[3] || "01");
+  }
+
+  const parsed = new Date(value);
+  if (!isNaN(parsed.getTime())) {
+    return Utilities.formatDate(parsed, Session.getScriptTimeZone(), "yyyy-MM-dd");
+  }
+  return text;
+}
+
 function appendRow(payload) {
   validateRow(payload);
   getSheet().appendRow([
     String(payload.ID),
-    String(payload["연월"]),
+    String(payload["연월일"]),
     String(payload["팀명"]),
     String(payload["팀원"]),
     String(payload["항목"]),
@@ -127,7 +150,7 @@ function replaceAllRows(rows) {
   if (rows.length > 0) {
     const values = rows.map(row => [
       String(row.ID),
-      String(row["연월"]),
+      String(row["연월일"]),
       String(row["팀명"]),
       String(row["팀원"]),
       String(row["항목"]),
@@ -138,15 +161,15 @@ function replaceAllRows(rows) {
 }
 
 function validateRow(row) {
-  const required = ["ID", "연월", "팀명", "팀원", "항목", "금액"];
+  const required = ["ID", "연월일", "팀명", "팀원", "항목", "금액"];
   required.forEach(key => {
     if (row[key] === undefined || row[key] === null || row[key] === "") {
       throw new Error("필수 값이 없습니다: " + key);
     }
   });
 
-  if (!/^\d{4}-\d{2}$/.test(String(row["연월"]))) {
-    throw new Error("연월은 YYYY-MM 형식이어야 합니다.");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(row["연월일"]))) {
+    throw new Error("연월일은 YYYY-MM-DD 형식이어야 합니다.");
   }
   if (!Number.isFinite(Number(row["금액"])) || Number(row["금액"]) < 0) {
     throw new Error("금액은 0 이상의 숫자여야 합니다.");

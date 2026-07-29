@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import re
 from datetime import date
 from io import BytesIO
 
@@ -24,11 +25,44 @@ API_URL = (
 CATEGORIES = ["복리후생비", "수선비", "출장비", "접대비"]
 TEAMS = ["기획팀", "개발팀", "제조팀", "경영팀"]
 MEMBERS = ["팀장", "팀원"]
-COLUMNS = ["ID", "연월", "팀명", "팀원", "항목", "금액"]
+COLUMNS = ["ID", "연월일", "팀명", "팀원", "항목", "금액"]
 
 
 def empty_data() -> pd.DataFrame:
     return pd.DataFrame(columns=COLUMNS)
+
+
+def normalize_date(value: object) -> str:
+    text = str(value).strip()
+    iso_match = re.match(r"^(\d{4})-(\d{2})(?:-(\d{2}))?", text)
+    if iso_match:
+        day = iso_match.group(3) or "01"
+        return f"{iso_match.group(1)}-{iso_match.group(2)}-{day}"
+
+    english_match = re.search(
+        r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+        r"\s+(\d{1,2})\s+(\d{4})",
+        text,
+    )
+    if english_match:
+        month_number = {
+            "Jan": "01", "Feb": "02", "Mar": "03", "Apr": "04",
+            "May": "05", "Jun": "06", "Jul": "07", "Aug": "08",
+            "Sep": "09", "Oct": "10", "Nov": "11", "Dec": "12",
+        }[english_match.group(1)]
+        return (
+            f"{english_match.group(3)}-{month_number}-"
+            f"{int(english_match.group(2)):02d}"
+        )
+    return text
+
+
+def date_label(value: object) -> str:
+    normalized = normalize_date(value)
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", normalized):
+        year, month, day = normalized.split("-")
+        return f"{year}년 {month}월 {day}일"
+    return normalized
 
 
 def parse_api_response(response: requests.Response) -> dict:
@@ -66,13 +100,25 @@ def load_data() -> pd.DataFrame:
     records = result.get("data", [])
     if not records:
         return empty_data()
+    for record in records:
+        if "연월일" not in record and "연월" in record:
+            record["연월일"] = record["연월"]
     result = pd.DataFrame(records, columns=COLUMNS)
     result["ID"] = result["ID"].astype(str)
+    result["연월일"] = result["연월일"].map(normalize_date)
+    result["팀명"] = (
+        result["팀명"]
+        .fillna("미지정")
+        .astype(str)
+        .replace({"None": "미지정", "nan": "미지정", "": "미지정"})
+    )
     result["금액"] = pd.to_numeric(result["금액"], errors="coerce").fillna(0).astype(int)
     return result
 
 
 def normalize_data(data: pd.DataFrame) -> pd.DataFrame:
+    if "연월일" not in data.columns and "연월" in data.columns:
+        data = data.rename(columns={"연월": "연월일"})
     missing = set(COLUMNS) - set(data.columns)
     if missing:
         raise ValueError(f"필수 열이 없습니다: {', '.join(sorted(missing))}")
@@ -80,12 +126,12 @@ def normalize_data(data: pd.DataFrame) -> pd.DataFrame:
     result = data[COLUMNS].copy()
     result["ID"] = result["ID"].astype(str)
     result["금액"] = pd.to_numeric(result["금액"], errors="raise").astype("int64")
-    result["연월"] = result["연월"].astype(str)
+    result["연월일"] = result["연월일"].map(normalize_date)
     result["팀명"] = result["팀명"].astype(str)
     result["팀원"] = result["팀원"].astype(str)
     result["항목"] = result["항목"].astype(str)
-    if (~result["연월"].str.match(r"^\d{4}-\d{2}$")).any():
-        raise ValueError("연월은 YYYY-MM 형식이어야 합니다.")
+    if (~result["연월일"].str.match(r"^\d{4}-\d{2}-\d{2}$")).any():
+        raise ValueError("연월일은 YYYY-MM-DD 형식이어야 합니다.")
     if (result["금액"] < 0).any():
         raise ValueError("금액은 0원 이상이어야 합니다.")
     return result
@@ -95,7 +141,7 @@ def replace_all_data(data: pd.DataFrame) -> None:
     records = [
         {
             "ID": str(row["ID"]),
-            "연월": str(row["연월"]),
+            "연월일": str(row["연월일"]),
             "팀명": str(row["팀명"]),
             "팀원": str(row["팀원"]),
             "항목": str(row["항목"]),
@@ -157,10 +203,7 @@ with input_tab:
         with st.form("budget_form", clear_on_submit=True):
             team = st.selectbox("팀명", TEAMS)
             member = st.selectbox("팀원 선택", MEMBERS)
-            selected_month = st.date_input(
-                "해당 월",
-                value=date.today().replace(day=1),
-            )
+            selected_date = st.date_input("사용일", value=date.today())
             category = st.selectbox("예산 항목", CATEGORIES)
             amount = st.number_input(
                 "사용 금액 (원)",
@@ -179,7 +222,7 @@ with input_tab:
                 {
                     "action": "append",
                     "ID": str(time.time_ns()),
-                    "연월": selected_month.strftime("%Y-%m"),
+                    "연월일": selected_date.strftime("%Y-%m-%d"),
                     "팀명": team,
                     "팀원": member,
                     "항목": category,
@@ -213,6 +256,7 @@ with input_tab:
             st.info("등록된 데이터가 없습니다.")
         else:
             display_data = data.copy()
+            display_data["연월일"] = display_data["연월일"].map(date_label)
             display_data["금액"] = display_data["금액"].map(
                 lambda value: f"{int(value):,}원"
             )
@@ -223,7 +267,8 @@ with input_tab:
             )
 
             delete_options = {
-                f"{row['연월']} | {row['팀명']} | {row['팀원']} | {row['항목']} | "
+                f"{date_label(row['연월일'])} | {row['팀명']} | "
+                f"{row['팀원']} | {row['항목']} | "
                 f"{int(row['금액']):,}원": str(row["ID"])
                 for _, row in data.iterrows()
             }
@@ -302,6 +347,8 @@ with dashboard_tab:
     if data.empty:
         st.info("데이터를 입력하면 차트와 월별 취합표가 표시됩니다.")
     else:
+        summary_data = data.copy()
+        summary_data["연월"] = summary_data["연월일"].str.slice(0, 7)
         chart_col1, chart_col2 = st.columns(2, gap="large")
         with chart_col1:
             st.subheader("항목별 예산 분포")
@@ -345,7 +392,7 @@ with dashboard_tab:
         st.subheader("📅 월별·항목별 요약 테이블")
         summary = (
             pd.pivot_table(
-                data,
+                summary_data,
                 index="연월",
                 columns="항목",
                 values="금액",
@@ -356,6 +403,10 @@ with dashboard_tab:
             .sort_index(ascending=False)
         )
         summary["합계"] = summary.sum(axis=1)
+        summary.index = summary.index.map(
+            lambda value: f"{value[:4]}년 {value[5:7]}월"
+        )
+        summary.index.name = "연월"
         st.dataframe(
             summary.reset_index(),
             hide_index=True,
